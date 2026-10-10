@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         HH3D - Tiên Giới Câu Cá Auto (Beta)
 // @namespace    hh3d-tien-gioi-fishing
-// @version      0.1.3
+// @version      0.1.4
 // @description  Tool câu cá Tiên Giới: bám trạng thái Ném câu/Chờ cá/Giữ, giữ cá quý và hỗ trợ bán cá thường ở 22/24.
 // @author       OpenAI
 // @match        *://hoathinh3d.you/game*
@@ -20,11 +20,11 @@
   const CFG = {
     capacity: 24,
     sellAt: 22,
-    pollMs: 550,
+    pollMs: 600,
     castWaitTimeoutMs: 90_000,
     reelTimeoutMs: 14_000,
-    actionCooldownMs: 1_000,
-    castTransitionTimeoutMs: 3_000,
+    actionCooldownMs: 1_200,
+    castTransitionTimeoutMs: 10_000, // Tăng lên 10 giây
     resultGraceMs: 6_500,
     maxHoldMs: 10_000,
     maxInterfaceMisses: 12,
@@ -38,6 +38,7 @@
   let holdStartedAt = 0;
   let reelStartedAt = 0;
   let interfaceMisses = 0;
+  let castRetryCount = 0; // Đếm số lần thử lại ném câu
   let bagFlow = null;
   let loopHandle = null;
   let heldTarget = null;
@@ -81,7 +82,7 @@
     </style>
     <button type="button" class="fish-fab" id="hh3df-fab">🎣 Câu Cá</button>
     <section class="fish-panel" id="hh3df-panel">
-      <div class="fish-head"><span>🎣 Tiên Giới · Câu Cá Auto <small>BETA 0.1.3</small></span><button class="fish-action fish-collapse" id="hh3df-hide" type="button">Ẩn</button></div>
+      <div class="fish-head"><span>🎣 Tiên Giới · Câu Cá Auto <small>BETA 0.1.4</small></span><button class="fish-action fish-collapse" id="hh3df-hide" type="button">Ẩn</button></div>
       <div class="fish-status" id="hh3df-status">Trạng thái: <strong>Sẵn sàng</strong></div>
       <div class="fish-row">
         <button type="button" class="fish-action fish-start" id="hh3df-start">▶ Bắt đầu</button>
@@ -106,7 +107,6 @@
       const host = document.body || document.documentElement;
       if (host) host.appendChild(root);
     }
-    // Reassert visibility in case the game UI changes stacking/inline styles.
     if (root.isConnected) {
       root.style.setProperty('position', 'fixed', 'important');
       root.style.setProperty('z-index', '2147483647', 'important');
@@ -146,7 +146,6 @@
 
   function pageText() {
     if (!document.body) return '';
-    // Loại nội dung panel của chính tool để status/log không tự kích hoạt bộ nhận diện.
     const parts = [];
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
@@ -182,7 +181,6 @@
 
   function isActionable(el) {
     if (el.matches('button,a,[role="button"],[onclick],input[type="button"],input[type="submit"],.btn,.cursor-pointer,[tabindex]:not([tabindex="-1"])')) return true;
-    // Some game controls are React divs without an onclick attribute; accept only those styled as interactive.
     return ['DIV', 'SPAN'].includes(el.tagName) && getComputedStyle(el).cursor === 'pointer';
   }
 
@@ -209,7 +207,6 @@
   }
 
   function findHoldButton() {
-    // Match the actual interactive control labelled “Giữ”, not any text that merely contains this word.
     return findClickable(/(^|[^a-z])giu([^a-z]|$)/);
   }
 
@@ -222,10 +219,38 @@
     };
   }
 
+  // --- CẢI TIẾN: Giả lập click toàn diện cho React/Vue ---
   function clickElement(el) {
     if (!el || !visible(el)) return false;
     try {
+      // Hiệu ứng visual để biết tool đang bấm vào đâu
+      const originalOutline = el.style.outline;
+      el.style.outline = '3px solid #ffeb3b';
+      setTimeout(() => { el.style.outline = originalOutline; }, 600);
+
+      // Cố gắng focus (một số game yêu cầu)
+      if (el.focus) try { el.focus({ preventScroll: true }); } catch (e) {}
+
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const opts = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, screenX: x, screenY: y, view: window };
+
+      // Gửi chuỗi sự kiện đầy đủ (Pointer -> Mouse -> Click)
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1 }));
+      }
+      el.dispatchEvent(new MouseEvent('mousedown', { ...opts, button: 0, buttons: 1 }));
+      
+      if (typeof PointerEvent === 'function') {
+        el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0 }));
+      }
+      el.dispatchEvent(new MouseEvent('mouseup', { ...opts, button: 0, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('click', { ...opts, button: 0 }));
+      
+      // Fallback an toàn cho các framework cũ
       el.click();
+
       lastActionAt = Date.now();
       return true;
     } catch (e) {
@@ -325,6 +350,7 @@
     if (countCatch && ['casting', 'waiting_bite', 'reeling'].includes(priorPhase)) noteCatchForManualCount();
     phase = 'result';
     phaseSince = now;
+    castRetryCount = 0; // Reset số lần thử lại
     log(reason);
     setStatus('Lượt câu đã kết thúc; chờ bảng kết quả đóng trước khi câu tiếp.', 'Đợi kết quả');
   }
@@ -335,6 +361,7 @@
     bagFlow = null;
     phase = 'idle';
     phaseSince = 0;
+    castRetryCount = 0;
     if (loopHandle) {
       clearInterval(loopHandle);
       loopHandle = null;
@@ -350,6 +377,7 @@
     phase = 'idle';
     phaseSince = Date.now();
     interfaceMisses = 0;
+    castRetryCount = 0;
     bagFlow = null;
     setStatus('Đang kiểm tra giao diện trước khi ném câu…', 'Đang chạy');
     log('Bắt đầu. Chỉ thao tác qua các nút giao diện nhận diện được.');
@@ -475,7 +503,6 @@
 
     if (f.stage === 'wait_sale') {
       const text = normalize(pageText());
-      // Chỉ xác nhận khi game thực sự hiện một hộp thoại xác nhận bán.
       if (/ban.*ca.*(xac nhan|ban chac|dong y)|xac nhan ban/.test(text)) {
         const confirm = findClickable(/^(xac nhan|dong y|ban ngay)$/);
         if (confirm && now - f.stageAt > 500) {
@@ -546,14 +573,13 @@
       }
 
       if (phase === 'result') {
-        // If the result was drawn on canvas, it may not be readable as DOM text; leave a grace period.
         if (now - phaseSince < CFG.resultGraceMs) return;
         phase = 'idle';
         phaseSince = now;
+        castRetryCount = 0; // Reset khi kết thúc result
         log('Hết thời gian chờ kết quả; kiểm tra giỏ rồi mới bắt đầu lượt tiếp theo.');
       }
 
-      // Ưu tiên bán ở 22/24 trước khi ném câu tiếp theo.
       if (autoSell && bag && bag.capacity === CFG.capacity && bag.count >= CFG.sellAt && phase === 'idle') {
         startBagFlow('auto');
         return;
@@ -579,37 +605,53 @@
 
       if (phase === 'casting') {
         const holdIsMinigame = !!controls.hold && !controls.waiting && !controls.withdraw && !controls.cast;
-        if (controls.waiting || controls.withdraw) {
-          phase = 'waiting_bite';
-          phaseSince = now;
-          setStatus('Game đã nhận ném câu; đang chờ cá cắn…', 'Đang chờ cá');
-          log('Đã xác nhận trạng thái sau khi ném câu: Chờ cá/Thu cần.');
-          return;
-        }
-        if (bite && controls.hold || holdIsMinigame) {
+        
+        // Ưu tiên nhận diện Minigame (kéo cá)
+        if (holdIsMinigame || (bite && controls.hold)) {
           phase = 'reeling';
           phaseSince = now;
           reelStartedAt = now;
           holdStartedAt = 0;
           setStatus('Đã nhận diện giao diện kéo cá; bắt đầu giữ nút “Giữ”.', 'Đang kéo cá');
-          log('Đã phát hiện trạng thái minigame: nút “Giữ” xuất hiện và nút chờ/thu cần biến mất.');
+          log('Đã phát hiện trạng thái minigame: nút “Giữ” xuất hiện.');
+          castRetryCount = 0; // Reset vì đã vào được minigame
           return;
         }
+        
+        if (controls.waiting || controls.withdraw) {
+          phase = 'waiting_bite';
+          phaseSince = now;
+          setStatus('Game đã nhận ném câu; đang chờ cá cắn…', 'Đang chờ cá');
+          log('Đã xác nhận trạng thái sau khi ném câu: Chờ cá/Thu cần.');
+          castRetryCount = 0; // Reset vì đã vào được trạng thái chờ
+          return;
+        }
+        
         if (!controls.cast) {
           phase = 'waiting_bite';
           phaseSince = now;
           log('Nút Ném câu biến mất sau thao tác; chờ tín hiệu cá cắn.');
+          castRetryCount = 0;
           return;
         }
+        
         if (now - phaseSince > CFG.castTransitionTimeoutMs) {
-          stop('Game không chuyển trạng thái sau khi bấm Ném câu. Có thể nút chưa nhận thao tác hoặc thẻ kết quả còn mở; tool dừng để tránh bấm chồng.');
+          if (castRetryCount < 3) {
+            castRetryCount++;
+            log(`Game chưa chuyển trạng thái sau khi ném câu (thử lại lần ${castRetryCount}/3). Có thể game bị lag.`);
+            phase = 'idle';
+            phaseSince = now;
+            lastActionAt = now - CFG.actionCooldownMs; // Cho phép bấm lại ngay
+          } else {
+            stop('Game không chuyển trạng thái sau khi bấm Ném câu quá 3 lần. Có thể nút chưa nhận thao tác hoặc thẻ kết quả còn mở; tool dừng để tránh bấm chồng.');
+          }
         }
         return;
       }
 
       if (phase === 'waiting_bite') {
         const holdIsMinigame = !!controls.hold && !controls.waiting && !controls.withdraw && !controls.cast;
-        if ((bite && controls.hold && !controls.waiting && !controls.withdraw && !controls.cast) || holdIsMinigame) {
+        if (holdIsMinigame || (bite && controls.hold && !controls.waiting && !controls.withdraw && !controls.cast)) {
           phase = 'reeling';
           phaseSince = now;
           reelStartedAt = now;
@@ -648,7 +690,6 @@
           }
           return;
         }
-        // Khi minigame biến mất và nút Ném câu quay lại, coi lượt kéo đã kết thúc; chờ kết quả/grace period.
         if (currentControls.cast && !currentControls.waiting && !currentControls.withdraw) {
           enterResult(now, 'Minigame kết thúc và nút “Ném câu” quay lại; chờ kết quả cá.', true);
           return;
@@ -711,9 +752,9 @@
     if (bagFlow) return;
     const wasRunning = running;
     if (!running) {
-      // Chạy riêng quy trình bán một lần, không tự ném câu.
       running = true;
       phase = 'idle';
+      castRetryCount = 0;
       if (loopHandle) clearInterval(loopHandle);
       loopHandle = setInterval(tick, CFG.pollMs);
     }
@@ -723,9 +764,7 @@
   $('#hh3df-check').addEventListener('click', inspectInterface);
   $('#hh3df-clear').addEventListener('click', () => { logLines = []; logEl.textContent = 'Đã xóa nhật ký.'; });
 
-  // Keep the beta conservative: all unexpected states end in a visible stop rather than repeated actions.
-
-  log('Tool v0.1.3 đã nạp. Kiểm tra giao diện trước khi bắt đầu; nếu không đọc được giỏ, nhập số cá đang thấy trên màn hình.');
+  log('Tool v0.1.4 đã nạp. Kiểm tra giao diện trước khi bắt đầu; nếu không đọc được giỏ, nhập số cá đang thấy trên màn hình.');
   setStatus('Sẵn sàng. Kiểm tra giao diện trước lượt đầu tiên.', 'Sẵn sàng');
 
   window.addEventListener('pagehide', () => {
